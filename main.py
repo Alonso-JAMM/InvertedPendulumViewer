@@ -1,10 +1,12 @@
 import signal
 import sys
+import ast
 from PySide2.QtUiTools import QUiLoader
 from PySide2.QtWidgets import QApplication
 from PySide2 import QtCore
 import pyqtgraph as pg
 import numpy as np
+from ArduinoController import ArduinoController
 
 
 class UiLoader(QUiLoader):
@@ -24,13 +26,12 @@ class AppMainWindow(QtCore.QObject):
         self.settings = QtCore.QSettings("AlonsoProjects", "InvPendulum")
         self.window.BaudRate.valueChanged.connect(self.newBaudRate)
         self.window.SerialPort.editingFinished.connect(self.newSerialPort)
-        self.window.ConnectButton.clicked.connect(self.updatePlot)
+        self.window.ConnectButton.clicked.connect(self.connectArduino)
+        self.window.CloseButton.clicked.connect(self.disconnectArduino)
         self.setupWidgets()
         self.distancePlot = DistancePlot(self.window.Plot.getPlotItem())
-#        self.timer = QtCore.QTimer()
-#        self.timer.timeout.connect(self.updatePlot)
-#        self.timer.start(700)
-        self.i = 0
+        self.threadpool = QtCore.QThreadPool()
+        self.arduinoThread = None
 
     def setupWidgets(self):
         """ Set up widgets from saved data."""
@@ -49,20 +50,67 @@ class AppMainWindow(QtCore.QObject):
         serialPort = self.window.SerialPort.text()
         self.settings.setValue("serialPort", serialPort)
 
-    def updatePlot(self):
+    def connectArduino(self):
+        """ Makes new thread in charge of communications with an
+        Arduino"""
+        self.distancePlot.resetArrays()
+        serialPort = self.window.SerialPort.text()
+        baudRate = self.window.BaudRate.value()
+        self.arduinoThread = Arduino(serialPort, baudRate)
+        self.arduinoThread.signals.newData.connect(self.updatePlot)
+        self.threadpool.start(self.arduinoThread)
+
+    def disconnectArduino(self):
+        """ Stops connection with the arduino. """
+        self.arduinoThread.close()
+
+    def updatePlot(self, a):
         """ Adds data to the plot"""
-        x = self.i
-        y = np.sin(self.i)
+        x = float(a[1]) / 1000
+        y = float(a[0])
         self.distancePlot.uptadeData(x, y)
-        self.i += 0.1
         self.distancePlot.plot()
+
+    def ardTest(self):
+        worker = Arduino("123", "abd")
+        worker.signals.newData.connect(self.updatePlot)
+        self.threadpool.start(worker)
+
+
+class Arduino (QtCore.QRunnable):
+    """ Worker thread"""
+    def __init__(self, serialPort, baudRate, *args, **kwargs):
+        super().__init__()
+        self.signals = ArduinoSignals()
+        self.arduino = ArduinoController(serialPort, baudRate)
+        self.toClose = False
+
+    @QtCore.Slot()
+    def run(self):
+        """ Initialize the runner function """
+        while self.arduino.isOpen():
+            a = self.arduino.read()
+            if a:
+                try:
+                    newData = ast.literal_eval(a)
+                    self.signals.newData.emit(newData)
+                except SyntaxError:
+                    print(a)
+
+    def close(self):
+        self.arduino.stop()
+
+
+class ArduinoSignals(QtCore.QObject):
+    """ Sginals available for worker thread"""
+    newData = QtCore.Signal(list)
 
 
 class DistancePlot():
     def __init__(self, plotItem):
         self.plotItem = plotItem
         self.setupPlot()
-        self.n = 100
+        self.n = 1000
         self.time = np.zeros(self.n)
         self.distance = np.zeros(self.n)
         self.currentIndex = 0
@@ -90,6 +138,10 @@ class DistancePlot():
             self.time[:n-1] = self.time[1:n]
             self.distance[n-1] = newDistance
             self.time[n-1] = newTime
+
+    def resetArrays(self):
+        self.time = np.zeros(self.n)
+        self.distance = np.zeros(self.n)
 
 
 if __name__ == "__main__":
